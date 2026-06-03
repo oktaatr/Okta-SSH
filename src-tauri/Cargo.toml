@@ -1,0 +1,21 @@
+[package]
+name = "okta-sshmanage"
+version = "0.1.0"
+description = "macOS desktop SSH connection manager"
+authors = ["Okta SSHManage"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+portable-pty = "0.8"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+base64 = "0.22"
+ouroboros = "0.18.5"
+tauri-plugin-dialog = "2.7.1"
+dirs = "5"
