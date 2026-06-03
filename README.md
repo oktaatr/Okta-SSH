@@ -6,15 +6,18 @@ The app is built with Tauri, Rust, Vite, and vanilla JavaScript. It keeps the fr
 
 ## Features
 
-- Manage SSH connection profiles with name, host, port, username, password, tags, favorites, and notes.
+- Manage SSH host profiles with label, address, port, username, password, and tags.
 - Search saved hosts by name, host, username, and tags.
 - Open multiple SSH session tabs with an embedded xterm-based terminal.
 - Start password-based SSH sessions with PTY resizing and live session status updates.
-- Copy or generate SSH commands for saved profiles.
-- Browse local and remote files in a dual-pane SFTP view.
-- Upload, download, rename, delete, and create directories through SFTP.
-- Drag files between supported local and remote SFTP panels.
-- Track file transfer progress and cancel supported uploads.
+- Generate SSH command strings through the backend command layer.
+- Browse local and remote files in a dual-pane SFTP-style file manager.
+- Switch each file panel between the local computer and a saved SSH host.
+- Upload local files to remote hosts and download selected remote files.
+- Rename and delete selected local or remote files and folders.
+- Create folders on active remote SFTP panels.
+- Drag files and folders between supported local and remote panels.
+- Track transfer progress and cancel supported uploads.
 - Create, edit, search, start, and stop local port-forwarding rules.
 - Store connection and port-forwarding data locally through the Tauri app data directory.
 - Preview the frontend in a browser with localStorage-backed mock data.
@@ -81,11 +84,34 @@ Build the frontend:
 npm run build
 ```
 
-Build the macOS desktop app:
+Build the macOS desktop app bundle and DMG installer:
 
 ```bash
 npm run desktop:build
 ```
+
+The build output is generated under `src-tauri/target/release/bundle/`.
+
+## Installing an Unsigned macOS Build
+
+The app is not code-signed or notarized yet. macOS Gatekeeper may block the first launch with a warning that the developer cannot be verified.
+
+For local testing, use one of these options:
+
+1. Open the generated `.dmg` from `src-tauri/target/release/bundle/dmg/`.
+2. Drag `Okta SSH.app` into `/Applications`.
+3. Right-click `Okta SSH.app` and choose **Open**.
+4. Confirm **Open** again when macOS shows the security warning.
+
+If macOS still blocks the app, open **System Settings > Privacy & Security**, then click **Open Anyway** for `Okta SSH.app`.
+
+As a local development fallback, you can remove the quarantine attribute after copying the app to `/Applications`:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Okta SSH.app"
+```
+
+Only use the unsigned build on machines you trust. For distribution, the app should be signed with an Apple Developer ID certificate and notarized by Apple.
 
 ## Makefile Commands
 
@@ -96,8 +122,9 @@ make install    # Install npm dependencies
 make start      # Start the Vite web service on http://127.0.0.1:1420
 make stop       # Stop the Vite web service
 make restart    # Restart the Vite web service
+make redeploy   # Install deps, rebuild frontend, rebuild desktop app/DMG, and restart the web service
 make build      # Build the frontend
-make desktop    # Build the macOS app bundle
+make desktop    # Build the macOS app bundle and DMG installer
 make status     # Show local web service status
 make clear      # Remove generated build, log, and runtime files
 make uninstall  # Remove generated files, dependencies, and local app data
@@ -105,7 +132,7 @@ make uninstall  # Remove generated files, dependencies, and local app data
 
 ## Local Data
 
-The desktop app stores its connection profiles and port-forwarding rules in the Tauri app data directory for `com.okta.sshmanage`.
+The desktop app stores its connection profiles and port-forwarding rules in the Tauri app data directory for `com.okta.sshmanage`, usually under `~/Library/Application Support/com.okta.sshmanage` on macOS.
 
 The browser preview does not use the Rust backend. It stores mock connection and port-forwarding data in `localStorage` so the interface can be tested without launching Tauri.
 
@@ -119,8 +146,10 @@ A future hardening step should move secrets into macOS Keychain or another encry
 
 - Connection profiles currently require a password. Embedded SSH sessions and SFTP connections use password authentication; SSH key and SSH agent authentication are not implemented for the normal host workflow.
 - Port forwarding currently creates local forwarding tunnels with `ssh -L`. Remote and dynamic forwarding modes are not implemented, even though the UI/model has room for rule types.
-- SFTP file transfers support local-to-remote uploads, remote-to-local downloads, and local-to-local copies. Direct remote-to-remote transfer is not supported.
-- SFTP drag-and-drop supports files only. Directory drag-and-drop is intentionally blocked.
+- The host data model includes fields for favorites and notes, but the current host form does not expose those fields.
+- SFTP toolbar upload/download actions are file-focused, but folder transfer is supported through panel drag-and-drop for supported directions.
+- Direct remote-to-remote SFTP transfer is not supported.
+- Creating new folders is currently exposed for remote SFTP panels only, not local panels.
 - Transfer cancellation is implemented for uploads; downloads do not currently share the same cancel path.
 - The frontend-only browser preview uses localStorage-backed mock behavior and does not perform real SSH, SFTP, or port-forwarding operations.
 

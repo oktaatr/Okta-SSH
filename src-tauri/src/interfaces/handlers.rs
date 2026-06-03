@@ -1,9 +1,10 @@
 use base64::{engine::general_purpose, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use ssh2::Session;
+use ssh2::{Session, Sftp};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,6 +23,285 @@ use crate::usecases::ssh_usecase;
 #[derive(Default)]
 pub struct TransferCancelRegistry {
     flags: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+fn emit_sftp_progress(
+    app: &AppHandle,
+    id: &str,
+    loaded: u64,
+    total: u64,
+    done: bool,
+    error: Option<String>,
+) {
+    let _ = app.emit("sftp-upload-progress", UploadProgressEvent {
+        id: id.to_string(),
+        loaded,
+        total,
+        done,
+        error,
+    });
+}
+
+fn join_remote_path(dir: &str, name: &str) -> String {
+    if dir.is_empty() || dir == "/" {
+        format!("/{}", name)
+    } else if dir.ends_with('/') {
+        format!("{}{}", dir, name)
+    } else {
+        format!("{}/{}", dir, name)
+    }
+}
+
+fn is_cancelled(cancel_flag: &Option<Arc<AtomicBool>>) -> bool {
+    cancel_flag
+        .as_ref()
+        .map_or(false, |flag| flag.load(Ordering::SeqCst))
+}
+
+fn local_total_bytes(path: &Path) -> Result<u64, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut total = 0;
+        for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            total += local_total_bytes(&entry.path())?;
+        }
+        Ok(total)
+    } else {
+        Ok(metadata.len())
+    }
+}
+
+fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() || path == Path::new("/") {
+        return Ok(());
+    }
+
+    if let Ok(stat) = sftp.stat(path) {
+        if stat.is_dir() {
+            return Ok(());
+        }
+        return Err(format!("Remote path already exists and is not a directory: {}", path.display()));
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && parent != path {
+            ensure_remote_dir(sftp, parent)?;
+        }
+    }
+
+    match sftp.mkdir(path, 0o755) {
+        Ok(_) => Ok(()),
+        Err(e) => match sftp.stat(path) {
+            Ok(stat) if stat.is_dir() => Ok(()),
+            _ => Err(e.to_string()),
+        },
+    }
+}
+
+fn upload_local_file(
+    sftp: &Sftp,
+    app: &AppHandle,
+    id: &str,
+    local_path: &Path,
+    remote_path: &Path,
+    cancel_flag: &Option<Arc<AtomicBool>>,
+    loaded: &mut u64,
+    total: u64,
+) -> Result<(), String> {
+    if is_cancelled(cancel_flag) {
+        return Err("Canceled".to_string());
+    }
+
+    let mut local_file = std::fs::File::open(local_path).map_err(|e| e.to_string())?;
+    let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
+
+    let mut buffer = [0u8; 65536];
+    let mut last_emit = std::time::Instant::now();
+
+    loop {
+        if is_cancelled(cancel_flag) {
+            drop(remote_file);
+            let _ = sftp.unlink(remote_path);
+            return Err("Canceled".to_string());
+        }
+
+        match local_file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+                *loaded += n as u64;
+                if last_emit.elapsed() > std::time::Duration::from_millis(30) {
+                    emit_sftp_progress(app, id, *loaded, total, false, None);
+                    last_emit = std::time::Instant::now();
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    Ok(())
+}
+
+fn upload_local_path(
+    sftp: &Sftp,
+    app: &AppHandle,
+    id: &str,
+    local_path: &Path,
+    remote_path: &Path,
+    cancel_flag: &Option<Arc<AtomicBool>>,
+    loaded: &mut u64,
+    total: u64,
+) -> Result<(), String> {
+    if is_cancelled(cancel_flag) {
+        return Err("Canceled".to_string());
+    }
+
+    let metadata = std::fs::symlink_metadata(local_path).map_err(|e| e.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        ensure_remote_dir(sftp, remote_path)?;
+        for entry in std::fs::read_dir(local_path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child_local = entry.path();
+            let child_remote = remote_path.join(entry.file_name());
+            upload_local_path(
+                sftp,
+                app,
+                id,
+                &child_local,
+                &child_remote,
+                cancel_flag,
+                loaded,
+                total,
+            )?;
+        }
+        Ok(())
+    } else {
+        upload_local_file(sftp, app, id, local_path, remote_path, cancel_flag, loaded, total)
+    }
+}
+
+fn remote_total_bytes(sftp: &Sftp, path: &Path) -> Result<u64, String> {
+    let stat = sftp.stat(path).map_err(|e| e.to_string())?;
+    if stat.is_dir() {
+        let mut total = 0;
+        for (entry_path, _) in sftp.readdir(path).map_err(|e| e.to_string())? {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if name.is_empty() || name == "." || name == ".." {
+                continue;
+            }
+            total += remote_total_bytes(sftp, &path.join(name))?;
+        }
+        Ok(total)
+    } else {
+        Ok(stat.size.unwrap_or(0))
+    }
+}
+
+fn download_remote_path(
+    sftp: &Sftp,
+    app: &AppHandle,
+    id: &str,
+    remote_path: &Path,
+    local_path: &Path,
+    loaded: &mut u64,
+    total: u64,
+) -> Result<(), String> {
+    let stat = sftp.stat(remote_path).map_err(|e| e.to_string())?;
+    if stat.is_dir() {
+        std::fs::create_dir_all(local_path).map_err(|e| e.to_string())?;
+        for (entry_path, _) in sftp.readdir(remote_path).map_err(|e| e.to_string())? {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if name.is_empty() || name == "." || name == ".." {
+                continue;
+            }
+            let child_remote = remote_path.join(name);
+            download_remote_path(
+                sftp,
+                app,
+                id,
+                &child_remote,
+                &local_path.join(name),
+                loaded,
+                total,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = local_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let mut remote_file = sftp.open(remote_path).map_err(|e| e.to_string())?;
+    let mut local_file = std::fs::File::create(local_path).map_err(|e| e.to_string())?;
+    let mut buffer = [0u8; 65536];
+    let mut last_emit = std::time::Instant::now();
+
+    loop {
+        match remote_file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                local_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+                *loaded += n as u64;
+                if last_emit.elapsed() > std::time::Duration::from_millis(30) {
+                    emit_sftp_progress(app, id, *loaded, total, false, None);
+                    last_emit = std::time::Instant::now();
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_local_path(source_path: &Path, target_path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(source_path).map_err(|e| e.to_string())?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::create_dir_all(target_path).map_err(|e| e.to_string())?;
+        for entry in std::fs::read_dir(source_path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            copy_local_path(&entry.path(), &target_path.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(source_path, target_path)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn remove_remote_path(sftp: &Sftp, path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() || path == Path::new("/") {
+        return Err("Cannot delete remote root directory".to_string());
+    }
+
+    let stat = sftp.lstat(path).or_else(|_| sftp.stat(path)).map_err(|e| e.to_string())?;
+    if stat.is_dir() && !stat.file_type().is_symlink() {
+        for (entry_path, _) in sftp.readdir(path).map_err(|e| e.to_string())? {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if name.is_empty() || name == "." || name == ".." {
+                continue;
+            }
+            remove_remote_path(sftp, &path.join(name))?;
+        }
+        sftp.rmdir(path).map_err(|e| e.to_string())
+    } else {
+        sftp.unlink(path).map_err(|e| e.to_string())
+    }
 }
 
 fn pf_probe_host(bind_address: &str) -> String {
@@ -437,96 +717,33 @@ pub async fn sftp_download_remote_files(
 
         for file_payload in remote_files.into_iter() {
             let remote_path_str = file_payload.path.clone();
-            let remote_path = std::path::Path::new(&remote_path_str);
-            let file_name = remote_path.file_name().unwrap_or_default().to_string_lossy();
+            let remote_path = Path::new(&remote_path_str);
+            let file_name = remote_path.file_name().unwrap_or_default();
             let file_id = file_payload.id.clone();
-
-            let mut remote_file = match sftp.open(remote_path) {
-                Ok(f) => f,
+            let local_path = Path::new(&local_dir).join(file_name);
+            let total = match remote_total_bytes(&sftp, remote_path) {
+                Ok(total) => total,
                 Err(e) => {
-                    let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                        id: file_id.clone(),
-                        loaded: 0,
-                        total: 0,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
+                    emit_sftp_progress(&app_handle, &file_id, 0, 0, true, Some(e));
                     continue;
                 }
             };
-            
-            let file_size = match remote_file.stat() {
-                Ok(stat) => stat.size.unwrap_or(0),
-                Err(_) => 0,
-            };
-
-            let local_path = std::path::Path::new(&local_dir).join(file_name.as_ref());
-
-            let mut local_file = match std::fs::File::create(&local_path) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                        id: file_id.clone(),
-                        loaded: 0,
-                        total: file_size,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
-                    continue;
-                }
-            };
-
-            use std::io::{Read, Write};
-            let mut buffer = [0u8; 65536];
             let mut loaded = 0;
-            let mut last_emit = std::time::Instant::now();
 
-            loop {
-                match remote_file.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Err(e) = local_file.write_all(&buffer[..n]) {
-                            let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                                id: file_id.clone(),
-                                loaded,
-                                total: file_size,
-                                done: true,
-                                error: Some(e.to_string()),
-                            });
-                            break;
-                        }
-                        loaded += n as u64;
-                        if last_emit.elapsed() > std::time::Duration::from_millis(30) {
-                            let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                                id: file_id.clone(),
-                                loaded,
-                                total: file_size,
-                                done: false,
-                                error: None,
-                            });
-                            last_emit = std::time::Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                            id: file_id.clone(),
-                            loaded,
-                            total: file_size,
-                            done: true,
-                            error: Some(e.to_string()),
-                        });
-                        break;
-                    }
+            match download_remote_path(
+                &sftp,
+                &app_handle,
+                &file_id,
+                remote_path,
+                &local_path,
+                &mut loaded,
+                total,
+            ) {
+                Ok(_) => emit_sftp_progress(&app_handle, &file_id, total, total, true, None),
+                Err(e) => {
+                    emit_sftp_progress(&app_handle, &file_id, loaded, total, true, Some(e));
                 }
             }
-
-            let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                id: file_id.clone(),
-                loaded: file_size,
-                total: file_size,
-                done: true,
-                error: None,
-            });
         }
         Ok(())
     })
@@ -543,10 +760,13 @@ pub async fn copy_local_files(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         for source_path_str in source_paths {
-            let source_path = std::path::Path::new(&source_path_str);
+            let source_path = Path::new(&source_path_str);
             let file_name = source_path.file_name().unwrap_or_default();
-            let target_path = std::path::Path::new(&target_dir).join(file_name);
-            std::fs::copy(source_path, target_path).map_err(|e| e.to_string())?;
+            let target_path = Path::new(&target_dir).join(file_name);
+            if source_path.is_dir() && target_path.starts_with(source_path) {
+                return Err("Cannot copy a folder into itself".to_string());
+            }
+            copy_local_path(source_path, &target_path)?;
         }
         Ok(())
     })
@@ -605,135 +825,29 @@ pub async fn sftp_upload_local_files(
         };
 
         for file_payload in files.into_iter() {
-            let path = std::path::Path::new(&file_payload.path);
+            let path = Path::new(&file_payload.path);
             let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-            let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let total = local_total_bytes(path).unwrap_or(0);
             let file_id = file_payload.id.clone();
             let cancel_flag = cancel_flags.lock().unwrap().get(&file_id).cloned();
 
-            let remote_path = if remote_dir.ends_with('/') {
-                format!("{}{}", remote_dir, file_name)
-            } else {
-                format!("{}/{}", remote_dir, file_name)
-            };
-
-            if cancel_flag
-                .as_ref()
-                .map_or(false, |flag| flag.load(Ordering::SeqCst))
-            {
-                let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                    id: file_id.clone(),
-                    loaded: 0,
-                    total: file_size,
-                    done: true,
-                    error: Some("Canceled".to_string()),
-                });
-                cancel_flags.lock().unwrap().remove(&file_id);
-                continue;
-            }
-
-            let mut local_file = match std::fs::File::open(path) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                        id: file_id.clone(),
-                        loaded: 0,
-                        total: file_size,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
-                    cancel_flags.lock().unwrap().remove(&file_id);
-                    continue;
-                }
-            };
-
-            let mut remote_file = match sftp.create(std::path::Path::new(&remote_path)) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                        id: file_id.clone(),
-                        loaded: 0,
-                        total: file_size,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
-                    cancel_flags.lock().unwrap().remove(&file_id);
-                    continue;
-                }
-            };
-
-            let mut buffer = [0u8; 65536]; 
             let mut loaded = 0;
-            let mut last_emit = std::time::Instant::now();
-            let mut canceled = false;
-            let mut failed = false;
+            let remote_path = PathBuf::from(join_remote_path(&remote_dir, &file_name));
 
-            loop {
-                if cancel_flag
-                    .as_ref()
-                    .map_or(false, |flag| flag.load(Ordering::SeqCst))
-                {
-                    drop(remote_file);
-                    let _ = sftp.unlink(std::path::Path::new(&remote_path));
-                    let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                        id: file_id.clone(),
-                        loaded,
-                        total: file_size,
-                        done: true,
-                        error: Some("Canceled".to_string()),
-                    });
-                    canceled = true;
-                    break;
+            match upload_local_path(
+                &sftp,
+                &app_handle,
+                &file_id,
+                path,
+                &remote_path,
+                &cancel_flag,
+                &mut loaded,
+                total,
+            ) {
+                Ok(_) => emit_sftp_progress(&app_handle, &file_id, total, total, true, None),
+                Err(e) => {
+                    emit_sftp_progress(&app_handle, &file_id, loaded, total, true, Some(e));
                 }
-
-                match local_file.read(&mut buffer) {
-                    Ok(0) => break, 
-                    Ok(n) => {
-                        if let Err(e) = remote_file.write_all(&buffer[..n]) {
-                            let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                                id: file_id.clone(),
-                                loaded,
-                                total: file_size,
-                                done: true,
-                                error: Some(e.to_string()),
-                            });
-                            failed = true;
-                            break;
-                        }
-                        loaded += n as u64;
-                        if last_emit.elapsed() > std::time::Duration::from_millis(30) {
-                            let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                                id: file_id.clone(),
-                                loaded,
-                                total: file_size,
-                                done: false,
-                                error: None,
-                            });
-                            last_emit = std::time::Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                            id: file_id.clone(),
-                            loaded,
-                            total: file_size,
-                            done: true,
-                            error: Some(e.to_string()),
-                        });
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-
-            if !canceled && !failed {
-                let _ = app_handle.emit("sftp-upload-progress", UploadProgressEvent {
-                    id: file_id.clone(),
-                    loaded: file_size,
-                    total: file_size,
-                    done: true,
-                    error: None,
-                });
             }
             cancel_flags.lock().unwrap().remove(&file_id);
         }
@@ -832,7 +946,7 @@ pub fn sftp_rmdir(
         .sftp()
         .map_err(|e| AppError::SftpOp(e.to_string()))?;
 
-    sftp.rmdir(std::path::Path::new(&path))
+    remove_remote_path(&sftp, Path::new(&path))
         .map_err(|e| AppError::SftpOp(e.to_string()))?;
 
     Ok(())

@@ -505,7 +505,11 @@ export function ensureSftpProgressListener() {
         if (headerEl) {
           const totalQ = state.sftpUploadQueue.length;
           const doneQ = state.sftpUploadQueue.filter(f => f.done).length;
-          headerEl.textContent = (doneQ === totalQ) ? "Upload complete" : `Uploading ${doneQ}/${totalQ} files…`;
+          const isDownloadOnly = state.sftpUploadQueue.every(item => item.type === "download");
+          const actionLabel = isDownloadOnly ? "Download" : "Transfer";
+          headerEl.textContent = (doneQ === totalQ)
+            ? `${actionLabel} complete`
+            : `Transferring ${doneQ}/${totalQ} items…`;
         }
         const allDone = state.sftpUploadQueue.every(e => e.done);
         if (allDone) {

@@ -215,11 +215,6 @@ function finishSftpPointerDrag(event) {
 
 async function transferDroppedSftpItem(item, targetSide, targetPanel) {
   if (item.side === targetSide) return;
-  if (item.isDir) {
-    state.notice = "Folder drag-and-drop is not fully supported yet. Please transfer files.";
-    render();
-    return;
-  }
 
   const sourcePanel = vm.getPanel(item.side);
   targetPanel.error = "";
@@ -1079,12 +1074,14 @@ export function sftpUploadOverlay() {
   const total = queue.length;
   const done = queue.filter((f) => f.done).length;
   const allDone = done === total;
+  const isDownloadOnly = queue.every((item) => item.type === "download");
+  const actionLabel = isDownloadOnly ? "Download" : "Transfer";
 
   return `
     <div class="sftp-upload-overlay">
       <div class="sftp-upload-panel">
         <div class="sftp-upload-panel-header">
-          <span>${allDone ? "Upload complete" : `Uploading ${done}/${total} files…`}</span>
+          <span>${allDone ? `${actionLabel} complete` : `Transferring ${done}/${total} items…`}</span>
           ${allDone ? `<button class="sftp-upload-close" type="button" data-action="sftp-dismiss-upload">${xIcon()}</button>` : ""}
         </div>
         <div class="sftp-upload-list">
