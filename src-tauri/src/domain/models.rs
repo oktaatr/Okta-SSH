@@ -11,6 +11,8 @@ pub struct SshConnection {
     #[serde(default)]
     pub password: Option<String>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub group: String,
     pub favorite: bool,
     pub notes: Option<String>,
     pub created_at: u64,
@@ -26,6 +28,8 @@ pub struct ConnectionDraft {
     pub username: String,
     pub password: Option<String>,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub group: String,
     pub favorite: bool,
     pub notes: Option<String>,
 }
@@ -50,7 +54,7 @@ pub struct PortForwardingRule {
     pub rule_type: String, // "local" | "remote" | "dynamic"
     pub host_id: String,
     pub bind_address: String,
-    pub bind_port: Option<u16>, 
+    pub bind_port: Option<u16>,
     pub target_address: String,
     pub target_port: Option<u16>,
     pub created_at: u64,
@@ -68,7 +72,7 @@ pub struct PortForwardingDraft {
     pub rule_type: String,
     pub host_id: String,
     pub bind_address: String,
-    pub bind_port: Option<u16>, 
+    pub bind_port: Option<u16>,
     pub target_address: String,
     pub target_port: Option<u16>,
 }

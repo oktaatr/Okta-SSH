@@ -52,6 +52,7 @@ export const initialState = {
   sessionStatusById: {},
   terminalOutputById: {},
   query: "",
+  selectedHostGroup: "",
   newTabQuery: "",
   modalOpen: false,
   modalMode: "new",

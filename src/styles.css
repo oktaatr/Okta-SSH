@@ -425,6 +425,7 @@ svg {
   position: relative;
   padding: 11px 8px 0 31px;
   background: #272321;
+  overflow: auto;
 }
 
 .toast,
@@ -459,6 +460,109 @@ svg {
 
 .hosts-section {
   margin-top: 0;
+}
+
+.hosts-section + .hosts-section {
+  margin-top: 28px;
+}
+
+.host-directory {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin: 1px 0 19px;
+  color: #9e948f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.host-directory button {
+  padding: 0;
+  background: transparent;
+  color: #de8654;
+  font: inherit;
+  cursor: pointer;
+}
+
+.host-directory button:hover {
+  color: #f2a071;
+}
+
+.host-directory svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.7;
+}
+
+.group-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 12px 13px;
+  margin-top: 16px;
+  padding-right: 21px;
+}
+
+.group-card {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  min-width: 0;
+  height: 60px;
+  padding: 0 16px;
+  border-radius: 16px;
+  background: #2a2523;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+  color: #f2eae4;
+  text-align: left;
+}
+
+.group-card:hover,
+.group-card:focus-visible {
+  background: #332d2a;
+  outline: 0;
+}
+
+.group-icon {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #245684;
+  color: #f2eae4;
+}
+
+.group-icon svg {
+  width: 22px;
+  height: 22px;
+  stroke-width: 2.1;
+}
+
+.group-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.group-card strong {
+  overflow: hidden;
+  color: #f2eae4;
+  font-size: 13px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-card small {
+  overflow: hidden;
+  color: #9e948f;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .host-grid {
@@ -1182,6 +1286,10 @@ svg {
   }
 
   .host-grid {
+    grid-template-columns: repeat(3, minmax(210px, 1fr));
+  }
+
+  .group-grid {
     grid-template-columns: repeat(3, minmax(210px, 1fr));
   }
 

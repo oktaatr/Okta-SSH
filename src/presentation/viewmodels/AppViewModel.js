@@ -17,6 +17,12 @@ export async function loadConnections() {
     state.pfRules = (pfRules || []).map(normalizePfRule);
     state.openedTabs = state.openedTabs.filter((tab) => findHost(tab.hostId));
     if (state.selectedId && !findHost(state.selectedId)) state.selectedId = null;
+    if (
+      state.selectedHostGroup &&
+      !state.connections.some((host) => hostGroupName(host) === state.selectedHostGroup)
+    ) {
+      state.selectedHostGroup = "";
+    }
     if (state.activeTabId && !findTab(state.activeTabId)) {
       state.activeTabId = state.openedTabs.at(-1)?.id || null;
       state.activeView = state.activeTabId
@@ -49,8 +55,52 @@ export function filteredHosts() {
   const q = state.query.trim().toLowerCase();
   if (!q) return state.connections;
   return state.connections.filter((h) =>
-    [h.name, h.host, h.username, ...(h.tags || [])].join(" ").toLowerCase().includes(q),
+    [h.name, h.host, h.username, h.group, ...(h.tags || [])].join(" ").toLowerCase().includes(q),
   );
+}
+
+export function hostGroupName(host) {
+  return String(host?.group || "").trim();
+}
+
+export function hostGroups(hosts = state.connections) {
+  const groupsByName = new Map();
+  hosts.forEach((host) => {
+    const name = hostGroupName(host);
+    if (!name) return;
+    const group = groupsByName.get(name);
+    if (group) group.hosts.push(host);
+    else groupsByName.set(name, { name, hosts: [host] });
+  });
+  return Array.from(groupsByName.values())
+    .map((group) => ({
+      ...group,
+      hosts: group.hosts.slice().sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function ungroupedHosts(hosts = state.connections) {
+  return hosts.filter((host) => !hostGroupName(host));
+}
+
+export function openHostGroup(groupName) {
+  const normalized = String(groupName || "").trim();
+  if (!normalized) return;
+  runWithoutStateUpdates(() => {
+    state.selectedHostGroup = normalized;
+    state.selectedId = null;
+    state.error = "";
+  });
+  render();
+}
+
+export function openAllHostGroups() {
+  runWithoutStateUpdates(() => {
+    state.selectedHostGroup = "";
+    state.error = "";
+  });
+  render();
 }
 
 export function filteredNewTabHosts() {
@@ -163,6 +213,7 @@ export function openHome() {
   runWithoutStateUpdates(() => {
     state.activeView = "home";
     state.activeTabId = null;
+    state.selectedHostGroup = "";
     state.modalOpen = false;
     state.modalMode = "new";
     state.draft = { ...EMPTY_DRAFT };
@@ -233,6 +284,7 @@ export function openEditHostModal(id) {
       username: host.username,
       password: host.password || "",
       tags: (host.tags || []).join(", "),
+      group: host.group || "",
       favorite: host.favorite || false,
       notes: host.notes || "",
     };
@@ -581,6 +633,7 @@ export async function saveHost(event) {
     username: state.draft.username.trim(),
     password: state.draft.password,
     tags: state.draft.tags.split(",").map((t) => t.trim()).filter(Boolean),
+    group: state.draft.group.trim(),
     favorite: false,
     notes: null,
   };

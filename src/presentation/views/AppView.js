@@ -1186,6 +1186,12 @@ export function sidebarPanel(hosts) {
 }
 
 export function hostsContent(hosts) {
+  const selectedGroup = state.selectedHostGroup;
+  const groups = selectedGroup ? [] : vm.hostGroups(hosts);
+  const visibleHosts = selectedGroup
+    ? hosts.filter((host) => vm.hostGroupName(host) === selectedGroup)
+    : vm.ungroupedHosts(hosts);
+
   return `
     <section class="main-panel">
       <div class="search-row">
@@ -1209,14 +1215,47 @@ export function hostsContent(hosts) {
         ${state.notice ? `<div class="toast">${escapeHtml(state.notice)}</div>` : ""}
         ${state.error ? `<div class="error-banner">${escapeHtml(state.error)}</div>` : ""}
 
+        ${selectedGroup ? hostDirectoryPanel(selectedGroup) : ""}
+        ${!selectedGroup && groups.length ? `
+          <section class="hosts-section groups-section">
+            <h2>Groups</h2>
+            <div class="group-grid">
+              ${groups.map(groupCard).join("")}
+            </div>
+          </section>
+        ` : ""}
+
         <section class="hosts-section">
           <h2>Hosts</h2>
           <div class="host-grid">
-            ${hosts.length ? hosts.map(hostCard).join("") : emptyHosts()}
+            ${visibleHosts.length ? visibleHosts.map(hostCard).join("") : emptyHosts(selectedGroup)}
           </div>
         </section>
       </div>
     </section>
+  `;
+}
+
+export function hostDirectoryPanel(groupName) {
+  return `
+    <nav class="host-directory" aria-label="Host directory">
+      <button type="button" data-action="all-hosts">All hosts</button>
+      ${chevronIcon()}
+      <span>${escapeHtml(groupName)}</span>
+    </nav>
+  `;
+}
+
+export function groupCard(group) {
+  const count = group.hosts.length;
+  return `
+    <button class="group-card" type="button" data-host-group="${escapeHtml(group.name)}" aria-label="Open ${escapeHtml(group.name)} group">
+      <span class="group-icon">${vaultIcon()}</span>
+      <span class="group-copy">
+        <strong>${escapeHtml(group.name)}</strong>
+        <small>${count} ${count === 1 ? "Host" : "Hosts"}</small>
+      </span>
+    </button>
   `;
 }
 
@@ -1300,11 +1339,11 @@ export function hostCard(host) {
   `;
 }
 
-export function emptyHosts() {
+export function emptyHosts(groupName = "") {
   return `
     <div class="empty-hosts">
-      <strong>No hosts yet</strong>
-      <span>Create a host from Home to start your SSH list.</span>
+      <strong>${groupName ? "No hosts in this group" : "No hosts yet"}</strong>
+      <span>${groupName ? "Add this group name to a host to show it here." : "Create a host from Home to start your SSH list."}</span>
     </div>
   `;
 }
@@ -1388,6 +1427,10 @@ export function hostModal() {
         <label>
           <span>Tags</span>
           <input name="tags" value="${escapeHtml(state.draft.tags)}" placeholder="ssh, okta, RC" />
+        </label>
+        <label>
+          <span>Group</span>
+          <input name="group" value="${escapeHtml(state.draft.group)}" placeholder="Production" />
         </label>
         <label>
           <span>Password</span>
@@ -1793,6 +1836,12 @@ app.addEventListener("click", (event) => {
     return;
   }
 
+  const groupCardElement = event.target.closest("[data-host-group]");
+  if (groupCardElement) {
+    vm.openHostGroup(groupCardElement.dataset.hostGroup);
+    return;
+  }
+
   // SFTP navigate up (..)
   const upRow = event.target.closest("[data-sftp-navigate-up]");
   if (upRow) {
@@ -1898,6 +1947,7 @@ app.addEventListener("click", (event) => {
     }
 
     if (action === "home") vm.openHome();
+    if (action === "all-hosts") vm.openAllHostGroups();
     if (action === "sftp") vm.openSftpView();
     if (action === "port-forwarding") {
       state.activeView = "port-forwarding";

@@ -5,6 +5,7 @@ export const EMPTY_DRAFT = {
   username: "",
   password: "",
   tags: "",
+  group: "",
   favorite: false,
   notes: "",
 };

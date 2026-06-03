@@ -15,6 +15,7 @@ pub fn create(draft: ConnectionDraft, id: String) -> Result<SshConnection, AppEr
         username: clean_text(draft.username),
         password: clean_optional(draft.password),
         tags: clean_tags(draft.tags),
+        group: clean_text(draft.group),
         favorite: draft.favorite,
         notes: clean_optional(draft.notes),
         created_at: now,
@@ -24,10 +25,7 @@ pub fn create(draft: ConnectionDraft, id: String) -> Result<SshConnection, AppEr
     Ok(connection)
 }
 
-pub fn update(
-    connection: &mut SshConnection,
-    draft: ConnectionDraft,
-) -> Result<(), AppError> {
+pub fn update(connection: &mut SshConnection, draft: ConnectionDraft) -> Result<(), AppError> {
     validate_draft(&draft)?;
     let now = unix_time();
 
@@ -37,6 +35,7 @@ pub fn update(
     connection.username = clean_text(draft.username);
     connection.password = clean_optional(draft.password);
     connection.tags = clean_tags(draft.tags);
+    connection.group = clean_text(draft.group);
     connection.favorite = draft.favorite;
     connection.notes = clean_optional(draft.notes);
     connection.updated_at = now;
@@ -95,6 +94,7 @@ pub fn validate_connection(connection: &SshConnection) -> Result<(), AppError> {
         username: connection.username.clone(),
         password: connection.password.clone(),
         tags: connection.tags.clone(),
+        group: connection.group.clone(),
         favorite: connection.favorite,
         notes: connection.notes.clone(),
     })
